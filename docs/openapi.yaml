@@ -1,0 +1,484 @@
+openapi: 3.1.0
+info:
+  title: ChatSite AI API
+  version: 1.0.0
+  description: Multi-tenant RAG chatbot SaaS — all routes prefixed with /api/v1
+servers:
+  - url: https://api.chatsite.ai/api/v1
+  - url: http://localhost:8000/api/v1
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        data: {}
+        meta:
+          type: object
+        error:
+          nullable: true
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+
+    UserRegister:
+      type: object
+      required: [email, password, full_name]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 128 }
+        full_name: { type: string }
+
+    UserLogin:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, example: bearer }
+        expires_in: { type: integer, example: 900 }
+
+    Workspace:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        subdomain: { type: string }
+        plan: { type: string, enum: [free, starter, pro, enterprise] }
+        settings: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+
+    Website:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        name: { type: string }
+        crawl_status:
+          type: string
+          enum: [idle, running, paused, done, failed]
+        pages_count: { type: integer }
+        chunks_count: { type: integer }
+        crawl_config: { type: object, additionalProperties: true }
+
+    CrawlStart:
+      type: object
+      required: [website_id]
+      properties:
+        website_id: { type: string, format: uuid }
+        force_recrawl: { type: boolean, default: false }
+
+    Chatbot:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        website_id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        is_active: { type: boolean }
+        settings: { type: object, additionalProperties: true }
+
+    ChatQuery:
+      type: object
+      required: [chatbot_id, session_id, message]
+      properties:
+        chatbot_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        message: { type: string, maxLength: 500 }
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              role: { type: string, enum: [user, assistant] }
+              content: { type: string }
+
+    ChatResponse:
+      type: object
+      properties:
+        response: { type: string }
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              url: { type: string }
+              title: { type: string }
+              score: { type: number }
+        confidence: { type: string, enum: [high, medium, low] }
+        suggested_questions:
+          type: array
+          items: { type: string }
+        model_used: { type: string }
+        latency_ms: { type: integer }
+
+paths:
+  /auth/register:
+    post:
+      summary: Register a new user
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserRegister' }
+      responses:
+        '201': { description: Created }
+
+  /auth/login:
+    post:
+      summary: Email + password login
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserLogin' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - properties:
+                      data: { $ref: '#/components/schemas/TokenPair' }
+
+  /auth/refresh:
+    post:
+      summary: Rotate access + refresh tokens
+      tags: [Auth]
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - properties:
+                      data: { $ref: '#/components/schemas/TokenPair' }
+
+  /auth/logout:
+    post:
+      summary: Revoke current refresh token
+      tags: [Auth]
+      responses:
+        '204': { description: No content }
+
+  /auth/forgot-password:
+    post:
+      summary: Issue password reset email
+      tags: [Auth]
+      security: []
+      responses: { '202': { description: Accepted } }
+
+  /auth/reset-password:
+    post:
+      summary: Reset password with token
+      tags: [Auth]
+      security: []
+      responses: { '200': { description: OK } }
+
+  /auth/verify-email:
+    post:
+      summary: Verify email via token
+      tags: [Auth]
+      security: []
+      responses: { '200': { description: OK } }
+
+  /workspaces:
+    get:
+      summary: List workspaces for current user
+      tags: [Workspaces]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create a workspace
+      tags: [Workspaces]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, subdomain]
+              properties:
+                name: { type: string }
+                subdomain: { type: string }
+                plan: { type: string }
+      responses: { '201': { description: Created } }
+
+  /workspaces/{id}:
+    get:
+      tags: [Workspaces]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { '200': { description: OK } }
+    put:
+      tags: [Workspaces]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { '200': { description: OK } }
+
+  /websites:
+    get:
+      tags: [Websites]
+      responses: { '200': { description: OK } }
+    post:
+      tags: [Websites]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, name]
+              properties:
+                url: { type: string, format: uri }
+                name: { type: string }
+                crawl_config: { type: object, additionalProperties: true }
+      responses: { '201': { description: Created } }
+
+  /websites/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    get:    { tags: [Websites], responses: { '200': { description: OK } } }
+    put:    { tags: [Websites], responses: { '200': { description: OK } } }
+    delete: { tags: [Websites], responses: { '204': { description: No content } } }
+
+  /crawl/start:
+    post:
+      tags: [Crawl]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CrawlStart' }
+      responses: { '202': { description: Accepted } }
+
+  /crawl/stop:
+    post:
+      tags: [Crawl]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [website_id]
+              properties:
+                website_id: { type: string, format: uuid }
+      responses: { '202': { description: Accepted } }
+
+  /crawl/reindex:
+    post:
+      tags: [Crawl]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [website_id]
+              properties:
+                website_id: { type: string, format: uuid }
+      responses: { '202': { description: Accepted } }
+
+  /crawl/status/{website_id}:
+    get:
+      tags: [Crawl]
+      parameters:
+        - in: path
+          name: website_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { '200': { description: OK } }
+
+  /chatbots:
+    get:  { tags: [Chatbots], responses: { '200': { description: OK } } }
+    post: { tags: [Chatbots], responses: { '201': { description: Created } } }
+
+  /chatbots/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    get:    { tags: [Chatbots], responses: { '200': { description: OK } } }
+    put:    { tags: [Chatbots], responses: { '200': { description: OK } } }
+    delete: { tags: [Chatbots], responses: { '204': { description: No content } } }
+
+  /chatbots/{id}/embed-code:
+    get:
+      tags: [Chatbots]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { '200': { description: OK } }
+
+  /chat/query:
+    post:
+      tags: [Chat]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatQuery' }
+      responses: { '200': { description: OK } }
+
+  /chat/stream:
+    post:
+      tags: [Chat]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatQuery' }
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream: {}
+
+  /analytics/summary:
+    get:
+      tags: [Analytics]
+      parameters:
+        - in: query
+          name: chatbot_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: period
+          schema: { type: string, default: 30d }
+      responses: { '200': { description: OK } }
+
+  /analytics/events:
+    get:
+      tags: [Analytics]
+      parameters:
+        - in: query
+          name: chatbot_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: event_type
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+      responses: { '200': { description: OK } }
+
+  /analytics/export:
+    get:
+      tags: [Analytics]
+      parameters:
+        - in: query
+          name: format
+          schema: { type: string, enum: [csv, json] }
+      responses: { '200': { description: OK } }
+
+  /conversations:
+    get:
+      tags: [Conversations]
+      parameters:
+        - in: query
+          name: chatbot_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+      responses: { '200': { description: OK } }
+
+  /conversations/{id}:
+    get:
+      tags: [Conversations]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { '200': { description: OK } }
+
+  /conversations/{id}/messages:
+    get:
+      tags: [Conversations]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { '200': { description: OK } }
+
+  /leads:
+    get:
+      tags: [Leads]
+      parameters:
+        - in: query
+          name: chatbot_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+      responses: { '200': { description: OK } }
+
+  /leads/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    get:    { tags: [Leads], responses: { '200': { description: OK } } }
+    delete: { tags: [Leads], responses: { '204': { description: No content } } }
+
+  /leads/export:
+    get:
+      tags: [Leads]
+      parameters:
+        - in: query
+          name: format
+          schema: { type: string, enum: [csv, json] }
+      responses: { '200': { description: OK } }
+
+  /billing/plans:
+    get:  { tags: [Billing], security: [], responses: { '200': { description: OK } } }
+  /billing/subscribe:
+    post: { tags: [Billing], responses: { '201': { description: Created } } }
+  /billing/cancel:
+    post: { tags: [Billing], responses: { '200': { description: OK } } }
+  /billing/portal:
+    post: { tags: [Billing], responses: { '200': { description: OK } } }

@@ -1,0 +1,148 @@
+name: chatsite
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  nginx:
+    <<: *common
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.frontend.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/ssl/certs:ro
+      - ./nginx/private:/etc/ssl/private:ro
+    depends_on:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: [dev, prod]
+
+  frontend:
+    <<: *common
+    build: ./frontend
+    profiles: [dev, prod]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    <<: *common
+    build: ./backend
+    env_file: .env
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-dev}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      qdrant:   { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: [dev, prod]
+    deploy:
+      resources:
+        limits: { memory: 1.5G }
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --proxy-headers"
+
+  celery-worker:
+    <<: *common
+    build: ./backend
+    env_file: .env
+    depends_on:
+      - backend
+      - redis
+    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=4
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.tasks.celery_app.celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources: { limits: { memory: 2G } }
+    profiles: [dev, prod]
+
+  celery-beat:
+    <<: *common
+    build: ./backend
+    env_file: .env
+    depends_on:
+      - celery-worker
+    command: celery -A app.tasks.celery_app.celery_app beat --loglevel=info
+    profiles: [dev, prod]
+    deploy: { resources: { limits: { memory: 512M } } }
+
+  postgres:
+    <<: *common
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: chatsite
+      POSTGRES_PASSWORD: chatsite
+      POSTGRES_DB: chatsite
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatsite -d chatsite"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles: [dev, prod]
+    deploy: { resources: { limits: { memory: 1G } } }
+
+  qdrant:
+    <<: *common
+    image: qdrant/qdrant:v1.12
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles: [dev, prod]
+    deploy: { resources: { limits: { memory: 1G } } }
+
+  redis:
+    <<: *common
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    profiles: [dev, prod]
+    deploy: { resources: { limits: { memory: 600M } } }
+
+  flower:
+    <<: *common
+    build: ./backend
+    env_file: .env
+    command: celery -A app.tasks.celery_app.celery_app flower --port=5555
+    ports: ["5555:5555"]
+    depends_on: [celery-worker]
+    profiles: [dev]
+
+volumes:
+  pgdata:
+  qdrant_data:
+  redisdata:
